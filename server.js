@@ -4,10 +4,12 @@ const bcrypt=require('bcryptjs');
 const Database=require('better-sqlite3');
 const fs=require('fs');
 const path=require('path');
+
 const PORT=Number(process.env.PORT||3000);
 const app=express();
 app.set('trust proxy',1);
 app.use(express.json({limit:'12mb'}));
+
 app.use(session({
  secret:process.env.SESSION_SECRET||'CHANGE_ME_GOLDUP_SESSION_SECRET',
  resave:false,
@@ -20,10 +22,12 @@ app.use(session({
   maxAge:1000*60*60*24*30
  }
 }));
+
 const dataDir=path.join(__dirname,'data');
 fs.mkdirSync(dataDir,{recursive:true});
 const sql=new Database(path.join(dataDir,'goldup.sqlite'));
 sql.pragma('journal_mode=WAL');
+
 sql.exec(`
 CREATE TABLE IF NOT EXISTS app_state(
  id INTEGER PRIMARY KEY CHECK(id=1),
@@ -48,12 +52,14 @@ CREATE TABLE IF NOT EXISTS promo_redemptions(
  PRIMARY KEY(user_id,code)
 );
 `);
+
 const svg=label=>'data:image/svg+xml;charset=UTF-8,'+encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="600" height="400">
 <rect width="100%" height="100%" rx="28" fill="#20263a"/>
 <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle"
 fill="#ffd447" font-family="Arial" font-size="42" font-weight="700">${label}</text>
 </svg>`);
+
 function seedState(){
  let s=JSON.parse(fs.readFileSync(path.join(__dirname,'seed.json'),'utf8'));
  s.users[0].avatar=svg('USER');
@@ -67,6 +73,7 @@ function seedState(){
  });
  return s;
 }
+
 if(!sql.prepare('SELECT 1 FROM app_state WHERE id=1').get()){
  const s=seedState();
  sql.prepare('INSERT INTO app_state(id,json) VALUES(1,?)')
@@ -76,11 +83,13 @@ if(!sql.prepare('SELECT 1 FROM app_state WHERE id=1').get()){
   'INSERT INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,1)'
  ).run('100001','admin@goldup.local',hash);
 }
+
 function getState(){
  return JSON.parse(
   sql.prepare('SELECT json FROM app_state WHERE id=1').get().json
  );
 }
+
 function setState(s){
  sql.prepare('UPDATE app_state SET json=? WHERE id=1')
    .run(JSON.stringify(s));
@@ -95,7 +104,8 @@ function publicState(s,current){
   return x;
  });
  return copy;
-  function requireAuth(req,res,next){
+}
+function requireAuth(req,res,next){
  if(!req.session.userId)
   return res.status(401).json({ok:false,error:'AUTH_REQUIRED'});
  next();
@@ -305,7 +315,7 @@ app.post('/api/logout',(req,res)=>{
   res.json({ok:true});
  });
 });
-  app.post('/api/redeem-code',requireAuth,(req,res)=>{
+app.post('/api/redeem-code',requireAuth,(req,res)=>{
  try{
   const cleanCode=String(req.body.code||'').trim().toUpperCase();
   if(!cleanCode)
