@@ -7,6 +7,13 @@ const path=require('path');
 
 const PORT=Number(process.env.PORT||3000);
 const app=express();
+app.get('/api/health',(req,res)=>{
+  res.json({
+    ok:true,
+    service:'GOLDUP',
+    time:new Date().toISOString()
+  });
+});
 app.set('trust proxy',1);
 app.use(express.json({limit:'12mb'}));
 
