@@ -490,3 +490,342 @@ app.post('/api/logout',(req,res)=>{
     res.json({ok:true});
   });
 });
+app.post('/api/redeem-code',auth,(req,res)=>{
+  const code=String(req.body?.code||'')
+    .trim()
+    .toUpperCase();
+
+  if(!code){
+    return res.status(400).json({
+      error:'Kodni kiriting.'
+    });
+  }
+
+  const tx=sql.transaction(()=>{
+    const s=getState();
+    const u=userById(s,req.session.userId);
+
+    if(!u){
+      return {err:'Mijoz topilmadi.'};
+    }
+
+    const c=s.codes.find(
+      x=>x.code===code
+    );
+
+    if(
+      !c ||
+      Number(c.uses||0)>=Number(c.max||0)
+    ){
+      return {
+        err:'Kod noto‘g‘ri yoki foydalanish limiti tugagan.'
+      };
+    }
+
+    if(
+      sql.prepare(
+        'SELECT 1 FROM code_redemptions WHERE user_id=? AND code=?'
+      ).get(u.id,code)
+    ){
+      return {
+        err:'Bu promokodni siz allaqachon ishlatgansiz.'
+      };
+    }
+
+    c.uses=Number(c.uses||0)+1;
+
+    u.balance=
+      Number(u.balance||0)+
+      Number(c.amount||0);
+
+    u.usedCodes=
+      Array.isArray(u.usedCodes)
+        ? u.usedCodes
+        : [];
+
+    if(!u.usedCodes.includes(code)){
+      u.usedCodes.push(code);
+    }
+
+    sql.prepare(
+      'INSERT INTO code_redemptions(user_id,code) VALUES(?,?)'
+    ).run(u.id,code);
+
+    setState(s);
+
+    return {
+      ok:true,
+      state:publicState(s,u.id),
+      amount:Number(c.amount||0)
+    };
+  })();
+
+  if(tx.err){
+    return res.status(400).json({
+      error:tx.err
+    });
+  }
+
+  res.json(tx);
+});
+
+
+app.post('/api/redeem-case-promo',auth,(req,res)=>{
+  const code=String(req.body?.code||'')
+    .trim()
+    .toUpperCase();
+
+  const caseId=String(
+    req.body?.caseId||''
+  );
+
+  const tx=sql.transaction(()=>{
+    const s=getState();
+
+    const u=userById(
+      s,
+      req.session.userId
+    );
+
+    const p=s.promoCodes.find(
+      x=>
+        x.code===code &&
+        String(x.caseId)===caseId
+    );
+
+    if(
+      !u ||
+      !p ||
+      Number(p.uses||0)>=Number(p.max||0)
+    ){
+      return {
+        err:'Kod noto‘g‘ri, boshqa keyga tegishli yoki limiti tugagan.'
+      };
+    }
+
+    if(
+      sql.prepare(
+        'SELECT 1 FROM promo_redemptions WHERE user_id=? AND code=?'
+      ).get(u.id,code)
+    ){
+      return {
+        err:'Bu promokodni siz allaqachon ishlatgansiz.'
+      };
+    }
+
+    p.uses=Number(p.uses||0)+1;
+
+    u.usedPromoCodes=
+      Array.isArray(u.usedPromoCodes)
+        ? u.usedPromoCodes
+        : [];
+
+    u.usedPromoCodes.push(code);
+
+    u.caseDiscounts=
+      u.caseDiscounts||{};
+
+    u.caseDiscounts[caseId]=Math.max(
+      Number(u.caseDiscounts[caseId]||0),
+      Math.min(
+        100,
+        Number(p.discount)||0
+      )
+    );
+
+    sql.prepare(
+      'INSERT INTO promo_redemptions(user_id,code) VALUES(?,?)'
+    ).run(u.id,code);
+
+    setState(s);
+
+    return {
+      ok:true,
+      state:publicState(s,u.id),
+      discount:Number(p.discount||0)
+    };
+  })();
+
+  if(tx.err){
+    return res.status(400).json({
+      error:tx.err
+    });
+  }
+
+  res.json(tx);
+});
+
+
+app.post('/api/admin/balance',auth,admin,(req,res)=>{
+  const id=String(
+    req.body?.id||''
+  );
+
+  const amount=Number(
+    req.body?.amount||0
+  );
+
+  if(
+    !id ||
+    !Number.isFinite(amount) ||
+    amount===0
+  ){
+    return res.status(400).json({
+      error:'Miqdor noto‘g‘ri.'
+    });
+  }
+
+  const s=getState();
+
+  const u=userById(s,id);
+
+  if(!u || u.admin){
+    return res.status(404).json({
+      error:'Mijoz topilmadi.'
+    });
+  }
+
+  const next=
+    Number(u.balance||0)+amount;
+
+  if(next<0){
+    return res.status(400).json({
+      error:'Balans 0 dan past bo‘lishi mumkin emas.'
+    });
+  }
+
+  u.balance=+next.toFixed(2);
+
+  setState(s);
+
+  res.json({
+    state:publicState(
+      s,
+      req.session.userId
+    )
+  });
+});
+
+
+app.post('/api/sync',auth,(req,res)=>{
+  const incoming=req.body;
+
+  if(
+    !incoming ||
+    typeof incoming!=='object'
+  ){
+    return res.status(400).json({
+      error:'Noto‘g‘ri ma’lumot.'
+    });
+  }
+
+  const s=getState();
+
+  const me=userById(
+    s,
+    req.session.userId
+  );
+
+  const isAdmin=!!me?.admin;
+
+  if(!me){
+    return res.status(401).json({
+      error:'Kirish talab qilinadi.'
+    });
+  }
+
+  if(isAdmin){
+    if(Array.isArray(incoming.cases)){
+      s.cases=incoming.cases;
+    }
+
+    if(Array.isArray(incoming.codes)){
+      s.codes=incoming.codes;
+    }
+
+    if(Array.isArray(incoming.promoCodes)){
+      s.promoCodes=incoming.promoCodes;
+    }
+
+    if(
+      incoming.stats &&
+      typeof incoming.stats==='object'
+    ){
+      s.stats=incoming.stats;
+    }
+  }
+
+  if(Array.isArray(incoming.users)){
+    for(const inc of incoming.users){
+
+      if(
+        String(inc.id)!==
+        String(req.session.userId) &&
+        !isAdmin
+      ){
+        continue;
+      }
+
+      const u=userById(
+        s,
+        inc.id
+      );
+
+      if(!u) continue;
+
+      const allowed={
+        ...inc
+      };
+
+      delete allowed.pass;
+      delete allowed.admin;
+
+      if(isAdmin && u.admin){
+        allowed.admin=true;
+      }
+
+      Object.assign(
+        u,
+        allowed
+      );
+    }
+  }
+
+  setState(s);
+
+  res.json({
+    ok:true,
+    state:publicState(
+      s,
+      req.session.userId
+    )
+  });
+});
+
+
+app.use(
+  express.static(
+    path.join(__dirname,'public')
+  )
+);
+
+
+app.use((req,res)=>{
+  res.sendFile(
+    path.join(
+      __dirname,
+      'public',
+      'index.html'
+    )
+  );
+});
+
+
+app.listen(
+  PORT,
+  ()=>{
+    console.log(
+      `GOLDUP server: http://localhost:${PORT}`
+    );
+  }
+);
