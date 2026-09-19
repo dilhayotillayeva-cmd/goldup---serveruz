@@ -4,88 +4,863 @@ const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
-
 const PORT = Number(process.env.PORT || 3000);
 const app = express();
+// Render reverse proxy
+app.set('trust proxy', 1);
 app.use(express.json({limit:'12mb'}));
-app.use(session({secret:process.env.SESSION_SECRET || 'CHANGE_ME_GOLDUP_SESSION_SECRET',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:1000*60*60*24*30}}));
-
-const dataDir=path.join(__dirname,'data'); fs.mkdirSync(dataDir,{recursive:true});
-const sql=new Database(path.join(dataDir,'goldup.sqlite'));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'CHANGE_ME_GOLDUP_SESSION_SECRET',
+  resave: false,
+  saveUninitialized: false,
+  proxy: true,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 1000 * 60 * 60 * 24 * 30
+  }
+}));
+const dataDir = path.join(__dirname,'data');
+fs.mkdirSync(dataDir,{recursive:true});
+const sql = new Database(
+  path.join(dataDir,'goldup.sqlite')
+);
 sql.pragma('journal_mode = WAL');
-sql.exec(`CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS users_auth (id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,pass_hash TEXT NOT NULL,admin INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_redemptions (user_id TEXT NOT NULL,code TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,code));
-CREATE TABLE IF NOT EXISTS promo_redemptions (user_id TEXT NOT NULL,code TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,code));`);
+sql.exec(`
+CREATE TABLE IF NOT EXISTS app_state (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS users_auth (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  pass_hash TEXT NOT NULL,
+  admin INTEGER NOT NULL DEFAULT 0
+);
 
-const svg=(label)=>'data:image/svg+xml;charset=UTF-8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400"><rect width="100%" height="100%" rx="28" fill="#20263a"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#ffd447" font-family="Arial" font-size="42" font-weight="700">${label}</text></svg>`);
+CREATE TABLE IF NOT EXISTS code_redemptions (
+  user_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id,code)
+);
+
+CREATE TABLE IF NOT EXISTS promo_redemptions (
+  user_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id,code)
+);
+`);
+
+const svg = (label) =>
+  'data:image/svg+xml;charset=UTF-8,' +
+  encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg"
+         width="600"
+         height="400">
+      <rect width="100%"
+            height="100%"
+            rx="28"
+            fill="#20263a"/>
+      <text x="50%"
+            y="50%"
+            dominant-baseline="middle"
+            text-anchor="middle"
+            fill="#ffd447"
+            font-family="Arial"
+            font-size="42"
+            font-weight="700">
+        ${label}
+      </text>
+    </svg>
+  `);
+
 function seedState(){
- let s=JSON.parse(fs.readFileSync(path.join(__dirname,'seed.json'),'utf8'));
- s.users[0].avatar=svg('USER');
- const labels={c1:['GOLD CASE',['GLOCK','AKR','M4','USP']],c2:['PREMIUM',['AWM','AKR','M4 GOLD']]};
- s.cases.forEach(c=>{c.image=svg(labels[c.id][0]);c.skins.forEach((x,i)=>x.image=svg(labels[c.id][1][i]));});
- return s;
-}
-if(!sql.prepare('SELECT 1 FROM app_state WHERE id=1').get()){
- const s=seedState(); sql.prepare('INSERT INTO app_state(id,json) VALUES(1,?)').run(JSON.stringify(s));
- const hash=bcrypt.hashSync('admin123',12); sql.prepare('INSERT INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,1)').run('100001','admin@goldup.local',hash);
-}
-function getState(){return JSON.parse(sql.prepare('SELECT json FROM app_state WHERE id=1').get().json)}
-function setState(s){sql.prepare('UPDATE app_state SET json=? WHERE id=1').run(JSON.stringify(s))}
-function publicState(s,current){
- const copy=JSON.parse(JSON.stringify(s)); copy.current=current||null;
- copy.users=copy.users.map(u=>{const x={...u};delete x.pass;return x});
- return copy;
-}
-function auth(req,res,next){if(!req.session.userId)return res.status(401).json({error:'Kirish talab qilinadi.'});next()}
-function admin(req,res,next){const a=sql.prepare('SELECT admin FROM users_auth WHERE id=?').get(req.session.userId);if(!a?.admin)return res.status(403).json({error:'Admin huquqi kerak.'});next()}
-function userById(s,id){return s.users.find(u=>String(u.id)===String(id))}
+  let s = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname,'seed.json'),
+      'utf8'
+    )
+  );
 
-app.get('/api/bootstrap',(req,res)=>{const s=getState();res.json(publicState(s,req.session.userId||null))});
-app.post('/api/migrate',(req,res)=>{
- const incoming=req.body;if(!incoming||typeof incoming!=='object')return res.json({ok:true});
- const s=getState();
- // Merge cases/skins/codes from the old browser copy so existing admin-added content is not lost.
- if(Array.isArray(incoming.cases)){
-  const byId=new Map(s.cases.map(x=>[String(x.id),x]));
-  for(const c of incoming.cases){if(!c?.id)continue;const old=byId.get(String(c.id));if(!old){byId.set(String(c.id),c)}else if(Array.isArray(c.skins)){const sm=new Map((old.skins||[]).map(x=>[String(x.id),x]));for(const sk of c.skins){if(sk?.id&&!sm.has(String(sk.id)))sm.set(String(sk.id),sk)}old.skins=[...sm.values()]}}
-  s.cases=[...byId.values()];
- }
- if(Array.isArray(incoming.codes))for(const c of incoming.codes){if(c?.code&&!s.codes.some(x=>x.code===c.code))s.codes.push({...c,uses:0})}
- if(Array.isArray(incoming.promoCodes))for(const p of incoming.promoCodes){if(p?.code&&!s.promoCodes.some(x=>x.code===p.code))s.promoCodes.push({...p,uses:0})}
- // Import non-admin users only when they do not already exist. Never import admin privilege.
- if(Array.isArray(incoming.users))for(const u of incoming.users){if(!u?.email||u.admin||s.users.some(x=>x.email===u.email))continue;const id=String(u.id||Math.floor(100000+Math.random()*899999));const nu={...u,id,admin:false};delete nu.pass;s.users.push(nu);if(u.pass)sql.prepare('INSERT OR IGNORE INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,0)').run(id,u.email,bcrypt.hashSync(u.pass,12))}
- setState(s);res.json({ok:true});
+  s.users[0].avatar = svg('USER');
+
+  const labels = {
+    c1:['GOLD CASE',['GLOCK','AKR','M4','USP']],
+    c2:['PREMIUM',['AWM','AKR','M4 GOLD']]
+  };
+
+  s.cases.forEach(c => {
+    c.image = svg(labels[c.id][0]);
+
+    c.skins.forEach((x,i) => {
+      x.image = svg(labels[c.id][1][i]);
+    });
+  });
+
+  return s;
+}
+
+if(!sql.prepare(
+  'SELECT 1 FROM app_state WHERE id=1'
+).get()){
+
+  const s = seedState();
+
+  sql.prepare(
+    'INSERT INTO app_state(id,json) VALUES(1,?)'
+  ).run(JSON.stringify(s));
+
+  const hash = bcrypt.hashSync('admin123',12);
+
+  sql.prepare(
+    'INSERT INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,1)'
+  ).run(
+    '100001',
+    'admin@goldup.local',
+    hash
+  );
+}
+
+function getState(){
+  return JSON.parse(
+    sql.prepare(
+      'SELECT json FROM app_state WHERE id=1'
+    ).get().json
+  );
+}
+
+function setState(s){
+  sql.prepare(
+    'UPDATE app_state SET json=? WHERE id=1'
+  ).run(JSON.stringify(s));
+}
+
+function publicState(s,current){
+  const copy = JSON.parse(
+    JSON.stringify(s)
+  );
+
+  copy.current = current || null;
+
+  copy.users = copy.users.map(u => {
+    const x = {...u};
+    delete x.pass;
+    return x;
+  });
+
+  return copy;
+}
+function requireAuth(req,res,next){
+  if(!req.session.userId){
+    return res.status(401).json({
+      ok:false,
+      error:'AUTH_REQUIRED'
+    });
+  }
+
+  next();
+}
+
+function requireAdmin(req,res,next){
+  if(!req.session.userId){
+    return res.status(401).json({
+      ok:false,
+      error:'AUTH_REQUIRED'
+    });
+  }
+
+  const row = sql.prepare(
+    'SELECT admin FROM users_auth WHERE id=?'
+  ).get(req.session.userId);
+
+  if(!row || !row.admin){
+    return res.status(403).json({
+      ok:false,
+      error:'ADMIN_REQUIRED'
+    });
+  }
+
+  next();
+}
+
+
+/* =========================
+   HEALTH CHECK
+========================= */
+
+app.get('/api/health',(req,res)=>{
+  res.json({
+    ok:true,
+    service:'GOLDUP',
+    time:new Date().toISOString()
+  });
 });
-app.post('/api/register',(req,res)=>{
- const {name,email,password}=req.body||{};const e=String(email||'').trim().toLowerCase();if(!name||!/^\S+@\S+\.\S+$/.test(e)||String(password||'').length<6)return res.status(400).json({error:'Ma’lumotlarni to‘g‘ri kiriting.'});
- if(sql.prepare('SELECT id FROM users_auth WHERE email=?').get(e))return res.status(409).json({error:'Bu email allaqachon mavjud.'});
- const s=getState();let id;do{id=String(Math.floor(100000+Math.random()*899999))}while(userById(s,id));
- const u={id,name:String(name).trim(),email:e,balance:0,admin:false,inventory:[],avatar:svg('USER'),usedCodes:[],usedPromoCodes:[],luck2x:false};s.users.push(u);sql.prepare('INSERT INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,0)').run(id,e,bcrypt.hashSync(password,12));setState(s);req.session.userId=id;res.json({state:publicState(s,id)});
+
+
+/* =========================
+   BOOTSTRAP
+========================= */
+
+app.get('/api/bootstrap',(req,res)=>{
+  try{
+    const state = getState();
+
+    let current = null;
+
+    if(req.session.userId){
+      current = state.users.find(
+        u => String(u.id) === String(req.session.userId)
+      ) || null;
+    }
+
+    res.json({
+      ok:true,
+      state:publicState(state,current)
+    });
+
+  }catch(e){
+
+    console.error('BOOTSTRAP ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'BOOTSTRAP_FAILED',
+      message:e.message
+    });
+  }
 });
-app.post('/api/login',(req,res)=>{const {email,password}=req.body||{};const a=sql.prepare('SELECT * FROM users_auth WHERE email=?').get(String(email||'').trim().toLowerCase());if(!a||!bcrypt.compareSync(String(password||''),a.pass_hash))return res.status(401).json({error:'Email yoki parol noto‘g‘ri.'});req.session.userId=a.id;res.json({state:publicState(getState(),a.id)});});
-app.post('/api/logout',(req,res)=>{req.session.destroy(()=>res.json({ok:true}))});
-app.post('/api/redeem-code',auth,(req,res)=>{
- const code=String(req.body?.code||'').trim().toUpperCase();if(!code)return res.status(400).json({error:'Kodni kiriting.'});
- const tx=sql.transaction(()=>{const s=getState();const u=userById(s,req.session.userId);if(!u)return {err:'Mijoz topilmadi.'};
-  const c=s.codes.find(x=>x.code===code);if(!c||Number(c.uses||0)>=Number(c.max||0))return {err:'Kod noto‘g‘ri yoki foydalanish limiti tugagan.'};
-  if(sql.prepare('SELECT 1 FROM code_redemptions WHERE user_id=? AND code=?').get(u.id,code))return {err:'Bu promokodni siz allaqachon ishlatgansiz.'};
-  c.uses=Number(c.uses||0)+1;u.balance=Number(u.balance||0)+Number(c.amount||0);u.usedCodes=Array.isArray(u.usedCodes)?u.usedCodes:[];if(!u.usedCodes.includes(code))u.usedCodes.push(code);sql.prepare('INSERT INTO code_redemptions(user_id,code) VALUES(?,?)').run(u.id,code);setState(s);return {ok:true,state:publicState(s,u.id),amount:Number(c.amount||0)}})();
- if(tx.err)return res.status(400).json({error:tx.err});res.json(tx);
+
+
+/* =========================
+   MIGRATE OLD LOCAL DATA
+========================= */
+
+app.post('/api/migrate',requireAuth,(req,res)=>{
+
+  try{
+
+    const incoming = req.body || {};
+    const state = getState();
+
+    if(Array.isArray(incoming.cases)){
+      state.cases = incoming.cases;
+    }
+
+    if(Array.isArray(incoming.skins)){
+      state.skins = incoming.skins;
+    }
+
+    if(Array.isArray(incoming.codes)){
+      state.codes = incoming.codes;
+    }
+
+    if(Array.isArray(incoming.promoCodes)){
+      state.promoCodes = incoming.promoCodes;
+    }
+
+    if(incoming.stats &&
+       typeof incoming.stats === 'object'){
+      state.stats = incoming.stats;
+    }
+
+    setState(state);
+
+    res.json({
+      ok:true,
+      state:publicState(
+        state,
+        state.users.find(
+          u => String(u.id) === String(req.session.userId)
+        )
+      )
+    });
+
+  }catch(e){
+
+    console.error('MIGRATE ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'MIGRATE_FAILED'
+    });
+  }
 });
-app.post('/api/redeem-case-promo',auth,(req,res)=>{
- const code=String(req.body?.code||'').trim().toUpperCase(),caseId=String(req.body?.caseId||'');
- const tx=sql.transaction(()=>{const s=getState();const u=userById(s,req.session.userId);const p=s.promoCodes.find(x=>x.code===code&&String(x.caseId)===caseId);if(!u||!p||Number(p.uses||0)>=Number(p.max||0))return {err:'Kod noto‘g‘ri, boshqa keyga tegishli yoki limiti tugagan.'};if(sql.prepare('SELECT 1 FROM promo_redemptions WHERE user_id=? AND code=?').get(u.id,code))return {err:'Bu promokodni siz allaqachon ishlatgansiz.'};p.uses=Number(p.uses||0)+1;u.usedPromoCodes=Array.isArray(u.usedPromoCodes)?u.usedPromoCodes:[];u.usedPromoCodes.push(code);u.caseDiscounts=u.caseDiscounts||{};u.caseDiscounts[caseId]=Math.max(Number(u.caseDiscounts[caseId]||0),Math.min(100,Number(p.discount)||0));sql.prepare('INSERT INTO promo_redemptions(user_id,code) VALUES(?,?)').run(u.id,code);setState(s);return {ok:true,state:publicState(s,u.id),discount:Number(p.discount||0)}})();
- if(tx.err)return res.status(400).json({error:tx.err});res.json(tx);
+
+
+/* =========================
+   REGISTER
+========================= */
+
+app.post('/api/register',async(req,res)=>{
+
+  try{
+
+    const {
+      id,
+      email,
+      pass
+    } = req.body || {};
+
+    if(!id || !email || !pass){
+      return res.status(400).json({
+        ok:false,
+        error:'MISSING_FIELDS'
+      });
+    }
+
+    const exists = sql.prepare(
+      'SELECT id FROM users_auth WHERE email=?'
+    ).get(String(email).trim().toLowerCase());
+
+    if(exists){
+      return res.status(409).json({
+        ok:false,
+        error:'EMAIL_EXISTS'
+      });
+    }
+
+    const passHash = await bcrypt.hash(
+      String(pass),
+      12
+    );
+
+    sql.prepare(`
+      INSERT INTO users_auth
+      (id,email,pass_hash,admin)
+      VALUES(?,?,?,0)
+    `).run(
+      String(id),
+      String(email).trim().toLowerCase(),
+      passHash
+    );
+
+    const state = getState();
+
+    if(!state.users.some(
+      u => String(u.id) === String(id)
+    )){
+
+      state.users.push({
+        id:String(id),
+        email:String(email).trim().toLowerCase(),
+        balance:0,
+        keys:0,
+        avatar:svg('USER')
+      });
+
+      setState(state);
+    }
+
+    req.session.userId = String(id);
+
+    res.json({
+      ok:true,
+      user:state.users.find(
+        u => String(u.id) === String(id)
+      )
+    });
+
+  }catch(e){
+
+    console.error('REGISTER ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'REGISTER_FAILED'
+    });
+  }
 });
-app.post('/api/admin/balance',auth,admin,(req,res)=>{const id=String(req.body?.id||''),amount=Number(req.body?.amount||0);if(!id||!Number.isFinite(amount)||amount===0)return res.status(400).json({error:'Miqdor noto‘g‘ri.'});const s=getState(),u=userById(s,id);if(!u||u.admin)return res.status(404).json({error:'Mijoz topilmadi.'});const next=Number(u.balance||0)+amount;if(next<0)return res.status(400).json({error:'Balans 0 dan past bo‘lishi mumkin emas.'});u.balance=+next.toFixed(2);setState(s);res.json({state:publicState(s,req.session.userId)});});
-app.post('/api/sync',auth,(req,res)=>{
- const incoming=req.body;if(!incoming||typeof incoming!=='object')return res.status(400).json({error:'Noto‘g‘ri ma’lumot.'});const s=getState(),me=userById(s,req.session.userId),isAdmin=!!me?.admin;if(!me)return res.status(401).json({error:'Kirish talab qilinadi.'});
- // Admin-only catalogs/statistics. Normal clients may only update their own user object.
- if(isAdmin){if(Array.isArray(incoming.cases))s.cases=incoming.cases;if(Array.isArray(incoming.codes))s.codes=incoming.codes;if(Array.isArray(incoming.promoCodes))s.promoCodes=incoming.promoCodes;if(incoming.stats&&typeof incoming.stats==='object')s.stats=incoming.stats;}
- if(Array.isArray(incoming.users)){for(const inc of incoming.users){if(String(inc.id)!==String(req.session.userId)&&!isAdmin)continue;const u=userById(s,inc.id);if(!u)continue;const allowed={...inc};delete allowed.pass;delete allowed.admin;if(isAdmin&&u.admin)allowed.admin=true;Object.assign(u,allowed)}}
- setState(s);res.json({ok:true,state:publicState(s,req.session.userId)});
+
+
+/* =========================
+   LOGIN
+========================= */
+
+app.post('/api/login',async(req,res)=>{
+
+  try{
+
+    const {
+      email,
+      pass
+    } = req.body || {};
+
+    const row = sql.prepare(`
+      SELECT id,email,pass_hash,admin
+      FROM users_auth
+      WHERE email=?
+    `).get(
+      String(email || '').trim().toLowerCase()
+    );
+
+    if(!row){
+
+      return res.status(401).json({
+        ok:false,
+        error:'INVALID_LOGIN'
+      });
+    }
+
+    const valid = await bcrypt.compare(
+      String(pass || ''),
+      row.pass_hash
+    );
+
+    if(!valid){
+
+      return res.status(401).json({
+        ok:false,
+        error:'INVALID_LOGIN'
+      });
+    }
+
+    req.session.userId = String(row.id);
+
+    const state = getState();
+
+    const user = state.users.find(
+      u => String(u.id) === String(row.id)
+    );
+
+    res.json({
+      ok:true,
+      user:user || {
+        id:String(row.id),
+        email:row.email,
+        admin:!!row.admin
+      }
+    });
+
+  }catch(e){
+
+    console.error('LOGIN ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'LOGIN_FAILED'
+    });
+  }
 });
-app.use(express.static(path.join(__dirname,'public')));
-app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-app.listen(PORT,()=>console.log(`GOLDUP server: http://localhost:${PORT}`));
+
+
+/* =========================
+   LOGOUT
+========================= */
+
+app.post('/api/logout',(req,res)=>{
+
+  req.session.destroy(()=>{
+    res.json({
+      ok:true
+    });
+  });/* =========================
+   REDEEM NORMAL PROMO CODE
+========================= */
+
+app.post('/api/redeem-code',requireAuth,(req,res)=>{
+
+  try{
+
+    const {
+      code
+    } = req.body || {};
+
+    const cleanCode = String(code || '')
+      .trim()
+      .toUpperCase();
+
+    if(!cleanCode){
+      return res.status(400).json({
+        ok:false,
+        error:'CODE_REQUIRED'
+      });
+    }
+
+    const state = getState();
+
+    const user = state.users.find(
+      u => String(u.id) === String(req.session.userId)
+    );
+
+    if(!user){
+      return res.status(404).json({
+        ok:false,
+        error:'USER_NOT_FOUND'
+      });
+    }
+
+    const promo = (state.codes || []).find(
+      c => String(c.code || '').toUpperCase() === cleanCode
+    );
+
+    if(!promo){
+      return res.status(400).json({
+        ok:false,
+        error:'INVALID_CODE'
+      });
+    }
+
+    /* Bir foydalanuvchi bir kodni faqat 1 marta ishlatadi */
+    const already = sql.prepare(`
+      SELECT 1
+      FROM code_redemptions
+      WHERE user_id=? AND code=?
+    `).get(
+      String(req.session.userId),
+      cleanCode
+    );
+
+    if(already){
+      return res.status(400).json({
+        ok:false,
+        error:'CODE_ALREADY_USED'
+      });
+    }
+
+    const amount = Number(
+      promo.amount ||
+      promo.value ||
+      0
+    );
+
+    user.balance =
+      Number(user.balance || 0) + amount;
+
+    sql.prepare(`
+      INSERT INTO code_redemptions
+      (user_id,code)
+      VALUES(?,?)
+    `).run(
+      String(req.session.userId),
+      cleanCode
+    );
+
+    setState(state);
+
+    res.json({
+      ok:true,
+      user
+    });
+
+  }catch(e){
+
+    console.error('REDEEM CODE ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'REDEEM_FAILED'
+    });
+  }
+});
+
+
+/* =========================
+   REDEEM CASE PROMO
+========================= */
+
+app.post('/api/redeem-case-promo',requireAuth,(req,res)=>{
+
+  try{
+
+    const {
+      id,
+      code
+    } = req.body || {};
+
+    const cleanCode = String(code || '')
+      .trim()
+      .toUpperCase();
+
+    const state = getState();
+
+    const user = state.users.find(
+      u => String(u.id) === String(req.session.userId)
+    );
+
+    if(!user){
+      return res.status(404).json({
+        ok:false,
+        error:'USER_NOT_FOUND'
+      });
+    }
+
+    const promo = (state.promoCodes || []).find(
+      p =>
+        String(p.id) === String(id) ||
+        String(p.code || '').toUpperCase() === cleanCode
+    );
+
+    if(!promo){
+      return res.status(400).json({
+        ok:false,
+        error:'INVALID_PROMO'
+      });
+    }
+
+    const promoCode = String(
+      promo.code || cleanCode
+    ).toUpperCase();
+
+    /* Bir foydalanuvchi promo-kodni qayta ishlata olmaydi */
+    const already = sql.prepare(`
+      SELECT 1
+      FROM promo_redemptions
+      WHERE user_id=? AND code=?
+    `).get(
+      String(req.session.userId),
+      promoCode
+    );
+
+    if(already){
+      return res.status(400).json({
+        ok:false,
+        error:'PROMO_ALREADY_USED'
+      });
+    }
+
+    const reward = Number(
+      promo.reward ||
+      promo.amount ||
+      promo.value ||
+      0
+    );
+
+    user.balance =
+      Number(user.balance || 0) + reward;
+
+    sql.prepare(`
+      INSERT INTO promo_redemptions
+      (user_id,code)
+      VALUES(?,?)
+    `).run(
+      String(req.session.userId),
+      promoCode
+    );
+
+    setState(state);
+
+    res.json({
+      ok:true,
+      user
+    });
+
+  }catch(e){
+
+    console.error('CASE PROMO ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'PROMO_REDEEM_FAILED'
+    });
+  }
+});
+
+
+/* =========================
+   ADMIN BALANCE
+========================= */
+
+app.post('/api/admin/balance',requireAdmin,(req,res)=>{
+
+  try{
+
+    const {
+      id,
+      sign
+    } = req.body || {};
+
+    const state = getState();
+
+    const user = state.users.find(
+      u => String(u.id) === String(id)
+    );
+
+    if(!user){
+      return res.status(404).json({
+        ok:false,
+        error:'USER_NOT_FOUND'
+      });
+    }
+
+    const amount = Number(
+      req.body.amount || 0
+    );
+
+    if(!Number.isFinite(amount) || amount <= 0){
+      return res.status(400).json({
+        ok:false,
+        error:'INVALID_AMOUNT'
+      });
+    }
+
+    if(sign === '-'){
+      user.balance =
+        Math.max(
+          0,
+          Number(user.balance || 0) - amount
+        );
+    }else{
+      user.balance =
+        Number(user.balance || 0) + amount;
+    }
+
+    setState(state);
+
+    res.json({
+      ok:true,
+      user
+    });
+
+  }catch(e){
+
+    console.error('ADMIN BALANCE ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'BALANCE_FAILED'
+    });
+  }
+});
+
+
+/* =========================
+   SYNC STATE
+========================= */
+
+app.post('/api/sync',requireAuth,(req,res)=>{
+
+  try{
+
+    const incoming = req.body || {};
+    const state = getState();
+
+    const me = state.users.find(
+      u => String(u.id) === String(req.session.userId)
+    );
+
+    if(!me){
+      return res.status(404).json({
+        ok:false,
+        error:'USER_NOT_FOUND'
+      });
+    }
+
+    const isAdmin = sql.prepare(
+      'SELECT admin FROM users_auth WHERE id=?'
+    ).get(req.session.userId);
+
+    if(isAdmin && isAdmin.admin){
+
+      if(Array.isArray(incoming.cases)){
+        state.cases = incoming.cases;
+      }
+
+      if(Array.isArray(incoming.skins)){
+        state.skins = incoming.skins;
+      }
+
+      if(Array.isArray(incoming.codes)){
+        state.codes = incoming.codes;
+      }
+
+      if(Array.isArray(incoming.promoCodes)){
+        state.promoCodes = incoming.promoCodes;
+      }
+
+      if(incoming.stats &&
+         typeof incoming.stats === 'object'){
+        state.stats = incoming.stats;
+      }
+
+    }else{
+
+      const incomingUser =
+        incoming.user || incoming.current;
+
+      if(incomingUser){
+
+        const target = state.users.find(
+          u =>
+            String(u.id) ===
+            String(req.session.userId)
+        );
+
+        if(target){
+
+          if(incomingUser.name !== undefined)
+            target.name = incomingUser.name;
+
+          if(incomingUser.avatar !== undefined)
+            target.avatar = incomingUser.avatar;
+        }
+      }
+    }
+
+    setState(state);
+
+    res.json({
+      ok:true,
+      state:publicState(
+        state,
+        state.users.find(
+          u =>
+            String(u.id) ===
+            String(req.session.userId)
+        )
+      )
+    });
+
+  }catch(e){
+
+    console.error('SYNC ERROR:',e);
+
+    res.status(500).json({
+      ok:false,
+      error:'SYNC_FAILED'
+    });
+  }
+});
+
+
+/* =========================
+   STATIC WEBSITE
+========================= */
+
+app.use(
+  express.static(
+    path.join(__dirname,'public')
+  )
+);
+
+
+/* =========================
+   SPA FALLBACK
+========================= */
+
+app.use((req,res)=>{
+
+  res.sendFile(
+    path.join(
+      __dirname,
+      'public',
+      'index.html'
+    )
+  );
+
+});
+
+
+/* =========================
+   START SERVER
+========================= */
+
+app.listen(PORT,()=>{
+  console.log(
+    `GOLDUP server: http://localhost:${PORT}`
+  );
+});
+
+});
