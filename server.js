@@ -15,7 +15,7 @@ app.set('trust proxy', 1);
 app.use(express.json({limit:'12mb'}));
 app.use(session({secret:process.env.SESSION_SECRET || 'CHANGE_ME_GOLDUP_SESSION_SECRET',resave:false,saveUninitialized:false,proxy:true,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:1000*60*60*24*30}}));
 
-const dataDir=process.env.DATA_DIR || : path.join(__dirname,'data'));
+const dataDir=process.env.DATA_DIR || path.join(__dirname,'data');
 fs.mkdirSync(dataDir,{recursive:true});
 console.log('GOLDUP data directory:',dataDir);
 const sql=new Database(path.join(dataDir,'goldup.sqlite'));
