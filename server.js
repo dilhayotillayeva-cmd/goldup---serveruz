@@ -8,7 +8,10 @@ const path = require('path');
 const PORT = Number(process.env.PORT || 3000);
 const app = express();
 
+// Render runs the app behind a reverse proxy.
+// Trusting the proxy lets secure session cookies work correctly on HTTPS.
 app.set('trust proxy', 1);
+
 app.use(express.json({limit:'12mb'}));
 
 app.use(session({
@@ -27,7 +30,9 @@ app.use(session({
 const dataDir = path.join(__dirname, 'data');
 fs.mkdirSync(dataDir, {recursive:true});
 
-const sql = new Database(path.join(dataDir, 'goldup.sqlite'));
+const sql = new Database(
+  path.join(dataDir, 'goldup.sqlite')
+);
 
 sql.pragma('journal_mode = WAL');
 
@@ -72,20 +77,35 @@ const svg = (label) =>
           fill="#ffd447"
           font-family="Arial"
           font-size="42"
-          font-weight="700">${label}</text>
-  </svg>`);
+          font-weight="700">
+      ${label}
+    </text>
+  </svg>
+  `);
 
 function seedState(){
-  const file = path.join(__dirname,'seed.json');
-
   let s = JSON.parse(
-    fs.readFileSync(file,'utf8')
+    fs.readFileSync(
+      path.join(__dirname,'seed.json'),
+      'utf8'
+    )
   );
 
-  s.users = s.users || [];
-  s.cases = s.cases || [];
-  s.codes = s.codes || [];
-  s.promoCodes = s.promoCodes || [];
+  s.users = Array.isArray(s.users)
+    ? s.users
+    : [];
+
+  s.cases = Array.isArray(s.cases)
+    ? s.cases
+    : [];
+
+  s.codes = Array.isArray(s.codes)
+    ? s.codes
+    : [];
+
+  s.promoCodes = Array.isArray(s.promoCodes)
+    ? s.promoCodes
+    : [];
 
   s.stats = s.stats || {
     totalOpens:0,
@@ -103,27 +123,60 @@ function seedState(){
     admin:true,
     inventory:[],
     usedCodes:[],
-    usedPromoCodes:[]
+    usedPromoCodes:[],
+    luck2x:false
   };
 
   s.users[0].id = '100001';
   s.users[0].email = 'admin@goldup.local';
   s.users[0].admin = true;
-  s.users[0].avatar = svg('ADMIN');
-    const labels = {
-    c1: ['GOLD CASE', ['GLOCK','AKR','M4','USP']],
-    c2: ['PREMIUM', ['AWM','AKR','M4 GOLD']]
+
+  s.users[0].inventory =
+    Array.isArray(s.users[0].inventory)
+      ? s.users[0].inventory
+      : [];
+
+  s.users[0].usedCodes =
+    Array.isArray(s.users[0].usedCodes)
+      ? s.users[0].usedCodes
+      : [];
+
+  s.users[0].usedPromoCodes =
+    Array.isArray(s.users[0].usedPromoCodes)
+      ? s.users[0].usedPromoCodes
+      : [];
+
+  s.users[0].luck2x =
+    !!s.users[0].luck2x;
+
+  const labels = {
+    c1: [
+      'GOLD CASE',
+      ['GLOCK','AKR','M4','USP']
+    ],
+    c2: [
+      'PREMIUM',
+      ['AWM','AKR','M4 GOLD']
+    ]
   };
 
   s.cases.forEach(c => {
     const z = labels[c.id];
 
+    c.skins = Array.isArray(c.skins)
+      ? c.skins
+      : [];
+
     if(z){
       c.image = c.image || svg(z[0]);
 
-      (c.skins || []).forEach((x,i) => {
+      c.skins.forEach((x,i) => {
         if(!x.image){
-          x.image = svg(z[1][i] || x.name || 'SKIN');
+          x.image = svg(
+            z[1][i] ||
+            x.name ||
+            'SKIN'
+          );
         }
       });
     }
@@ -132,14 +185,17 @@ function seedState(){
   return s;
 }
 
-if(!sql.prepare('SELECT 1 FROM app_state WHERE id=1').get()){
+if(
+  !sql.prepare(
+    'SELECT 1 FROM app_state WHERE id=1'
+  ).get()
+){
   const s = seedState();
 
   sql.prepare(
     'INSERT INTO app_state(id,json) VALUES(1,?)'
   ).run(JSON.stringify(s));
 }
-
 function getState(){
   return JSON.parse(
     sql.prepare(
@@ -154,20 +210,18 @@ function setState(s){
   ).run(JSON.stringify(s));
 }
 
-function userById(s,id){
-  return s.users.find(
-    u => String(u.id) === String(id)
-  );
-}
-
 function publicState(s,current){
-  const copy = JSON.parse(JSON.stringify(s));
+  const copy = JSON.parse(
+    JSON.stringify(s)
+  );
 
   copy.current = current || null;
 
-  copy.users = (copy.users || []).map(u => {
+  copy.users = copy.users.map(u => {
     const x = {...u};
+
     delete x.pass;
+
     return x;
   });
 
@@ -175,30 +229,78 @@ function publicState(s,current){
 }
 
 function ensureAdmin(){
+
+  const id = '100001';
   const email = 'admin@goldup.local';
   const password = 'admin123';
-  const id = '100001';
 
-  const hash = bcrypt.hashSync(password,12);
+  const hash = bcrypt.hashSync(
+    password,
+    12
+  );
 
-  const existing = sql.prepare(
+  const row = sql.prepare(
     'SELECT id FROM users_auth WHERE email=?'
   ).get(email);
 
-  if(existing){
-    sql.prepare(
-      'UPDATE users_auth SET id=?,pass_hash=?,admin=1,email=? WHERE email=?'
-    ).run(id,hash,email,email);
+  if(row){
+
+    if(String(row.id) !== id){
+
+      sql.prepare(
+        'UPDATE users_auth SET id=?,pass_hash=?,admin=1 WHERE email=?'
+      ).run(
+        id,
+        hash,
+        email
+      );
+
+    }else{
+
+      sql.prepare(
+        'UPDATE users_auth SET pass_hash=?,admin=1 WHERE email=?'
+      ).run(
+        hash,
+        email
+      );
+
+    }
+
   }else{
+
+    const idRow = sql.prepare(
+      'SELECT email FROM users_auth WHERE id=?'
+    ).get(id);
+
+    if(
+      idRow &&
+      idRow.email !== email
+    ){
+
+      sql.prepare(
+        'DELETE FROM users_auth WHERE id=?'
+      ).run(id);
+
+    }
+
     sql.prepare(
-      'INSERT INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,1)'
-    ).run(id,email,hash);
+      'INSERT OR REPLACE INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,1)'
+    ).run(
+      id,
+      email,
+      hash
+    );
   }
 
   const s = getState();
-  let u = userById(s,id);
+
+  let u = userById(
+    s,
+    id
+  );
 
   if(!u){
+
     u = {
       id,
       name:'Admin',
@@ -219,10 +321,20 @@ function ensureAdmin(){
   u.email = email;
   u.admin = true;
 
-  if(!u.name) u.name = 'Admin';
-  if(!Array.isArray(u.inventory)) u.inventory = [];
-  if(!Array.isArray(u.usedCodes)) u.usedCodes = [];
-  if(!Array.isArray(u.usedPromoCodes)) u.usedPromoCodes = [];
+  u.inventory =
+    Array.isArray(u.inventory)
+      ? u.inventory
+      : [];
+
+  u.usedCodes =
+    Array.isArray(u.usedCodes)
+      ? u.usedCodes
+      : [];
+
+  u.usedPromoCodes =
+    Array.isArray(u.usedPromoCodes)
+      ? u.usedPromoCodes
+      : [];
 
   setState(s);
 }
@@ -230,130 +342,227 @@ function ensureAdmin(){
 ensureAdmin();
 
 function auth(req,res,next){
+
   if(!req.session.userId){
+
     return res.status(401).json({
       error:'Kirish talab qilinadi.'
     });
+
   }
 
   next();
 }
 
 function admin(req,res,next){
+
   const a = sql.prepare(
     'SELECT admin FROM users_auth WHERE id=?'
   ).get(req.session.userId);
 
   if(!a?.admin){
+
     return res.status(403).json({
       error:'Admin huquqi kerak.'
     });
+
   }
 
   next();
 }
 
-app.get('/api/health',(req,res) =>
-  res.json({
-    ok:true,
-    service:'GOLDUP',
-    time:new Date().toISOString()
-  })
+function userById(s,id){
+
+  return s.users.find(
+    u =>
+      String(u.id) ===
+      String(id)
+  );
+}
+
+// Render/browser health check
+app.get(
+  '/api/health',
+  (req,res) =>
+    res.json({
+      ok:true,
+      service:'GOLDUP',
+      time:new Date().toISOString()
+    })
 );
 
-app.get('/api/bootstrap',(req,res)=>{
-  try{
-    const s = getState();
+app.get(
+  '/api/bootstrap',
+  (req,res) => {
 
-    res.json(
-      publicState(
-        s,
-        req.session.userId || null
-      )
-    );
-  }catch(e){
-    res.status(500).json({
-      error:'STATE_ERROR'
-    });
+    try{
+
+      const s = getState();
+
+      res.json({
+        ok:true,
+        state:publicState(
+          s,
+          req.session.userId || null
+        )
+      });
+
+    }catch(e){
+
+      console.error(
+        'GOLDUP /api/bootstrap error:',
+        e
+      );
+
+      res.status(500).json({
+        error:'Server state yuklanmadi.'
+      });
+
+    }
+
   }
-});
+);
 app.post('/api/migrate',(req,res)=>{
-  const incoming=req.body;
 
-  if(!incoming || typeof incoming!=='object'){
+  const incoming = req.body;
+
+  if(
+    !incoming ||
+    typeof incoming !== 'object'
+  ){
     return res.json({ok:true});
   }
 
-  const s=getState();
+  const s = getState();
 
+  // Eski browserdagi keys/skins ma'lumotlarini
+  // serverdagi ma'lumotlar bilan birlashtiradi.
   if(Array.isArray(incoming.cases)){
-    const byId=new Map(
-      s.cases.map(x=>[String(x.id),x])
+
+    const byId = new Map(
+      s.cases.map(
+        x => [String(x.id),x]
+      )
     );
 
     for(const c of incoming.cases){
+
       if(!c?.id) continue;
 
-      const old=byId.get(String(c.id));
+      const old =
+        byId.get(String(c.id));
 
       if(!old){
-        byId.set(String(c.id),c);
-      }else if(Array.isArray(c.skins)){
-        const sm=new Map(
-          (old.skins||[]).map(
-            x=>[String(x.id),x]
+
+        byId.set(
+          String(c.id),
+          c
+        );
+
+      }else if(
+        Array.isArray(c.skins)
+      ){
+
+        const sm = new Map(
+          (old.skins || []).map(
+            x => [String(x.id),x]
           )
         );
 
         for(const sk of c.skins){
-          if(sk?.id && !sm.has(String(sk.id))){
-            sm.set(String(sk.id),sk);
+
+          if(
+            sk?.id &&
+            !sm.has(String(sk.id))
+          ){
+            sm.set(
+              String(sk.id),
+              sk
+            );
           }
+
         }
 
-        old.skins=[...sm.values()];
+        old.skins = [
+          ...sm.values()
+        ];
       }
     }
 
-    s.cases=[...byId.values()];
+    s.cases = [
+      ...byId.values()
+    ];
   }
 
+  // Oddiy promokodlarni birlashtirish
   if(Array.isArray(incoming.codes)){
+
     for(const c of incoming.codes){
+
       if(
         c?.code &&
-        !s.codes.some(x=>x.code===c.code)
+        !s.codes.some(
+          x => x.code === c.code
+        )
       ){
-        s.codes.push({...c,uses:0});
+
+        s.codes.push({
+          ...c,
+          uses:0
+        });
+
       }
+
     }
   }
 
+  // Case promokodlarini birlashtirish
   if(Array.isArray(incoming.promoCodes)){
+
     for(const p of incoming.promoCodes){
+
       if(
         p?.code &&
-        !s.promoCodes.some(x=>x.code===p.code)
+        !s.promoCodes.some(
+          x => x.code === p.code
+        )
       ){
-        s.promoCodes.push({...p,uses:0});
+
+        s.promoCodes.push({
+          ...p,
+          uses:0
+        });
+
       }
+
     }
   }
 
+  // Eski mijozlarni serverga o'tkazish.
+  // Admin huquqi hech qachon import qilinmaydi.
   if(Array.isArray(incoming.users)){
+
     for(const u of incoming.users){
+
       if(
         !u?.email ||
         u.admin ||
-        s.users.some(x=>x.email===u.email)
-      ) continue;
+        s.users.some(
+          x => x.email === u.email
+        )
+      ){
+        continue;
+      }
 
-      const id=String(
+      const id = String(
         u.id ||
-        Math.floor(100000+Math.random()*899999)
+        Math.floor(
+          100000 +
+          Math.random() * 899999
+        )
       );
 
-      const nu={
+      const nu = {
         ...u,
         id,
         admin:false
@@ -364,38 +573,57 @@ app.post('/api/migrate',(req,res)=>{
       s.users.push(nu);
 
       if(u.pass){
+
         sql.prepare(
           'INSERT OR IGNORE INTO users_auth(id,email,pass_hash,admin) VALUES(?,?,?,0)'
         ).run(
           id,
           u.email,
-          bcrypt.hashSync(u.pass,12)
+          bcrypt.hashSync(
+            u.pass,
+            12
+          )
         );
+
       }
+
     }
+
   }
 
   setState(s);
 
-  res.json({ok:true});
+  res.json({
+    ok:true
+  });
+
 });
 
 
 app.post('/api/register',(req,res)=>{
-  const {name,email,password}=req.body||{};
 
-  const e=String(email||'')
-    .trim()
-    .toLowerCase();
+  const {
+    name,
+    email,
+    password
+  } = req.body || {};
+
+  const e = String(
+    email || ''
+  )
+  .trim()
+  .toLowerCase();
 
   if(
-    !String(name||'').trim() ||
+    !name ||
     !/^\S+@\S+\.\S+$/.test(e) ||
-    String(password||'').length<6
+    String(password || '').length < 6
   ){
+
     return res.status(400).json({
       error:'Ma’lumotlarni to‘g‘ri kiriting.'
     });
+
   }
 
   if(
@@ -403,22 +631,31 @@ app.post('/api/register',(req,res)=>{
       'SELECT id FROM users_auth WHERE email=?'
     ).get(e)
   ){
+
     return res.status(409).json({
       error:'Bu email allaqachon mavjud.'
     });
+
   }
 
-  const s=getState();
+  const s = getState();
 
   let id;
 
   do{
-    id=String(
-      Math.floor(100000+Math.random()*899999)
-    );
-  }while(userById(s,id));
 
-  const u={
+    id = String(
+      Math.floor(
+        100000 +
+        Math.random() * 899999
+      )
+    );
+
+  }while(
+    userById(s,id)
+  );
+
+  const u = {
     id,
     name:String(name).trim(),
     email:e,
@@ -438,43 +675,56 @@ app.post('/api/register',(req,res)=>{
   ).run(
     id,
     e,
-    bcrypt.hashSync(password,12)
+    bcrypt.hashSync(
+      password,
+      12
+    )
   );
 
   setState(s);
 
-  req.session.userId=id;
+  req.session.userId = id;
 
   res.json({
-    state:publicState(s,id)
+    state:publicState(
+      s,
+      id
+    )
   });
+
 });
 
 
 app.post('/api/login',(req,res)=>{
-  const {email,password}=req.body||{};
 
-  const e=String(email||'')
-    .trim()
-    .toLowerCase();
+  const {
+    email,
+    password
+  } = req.body || {};
 
-  const a=sql.prepare(
+  const a = sql.prepare(
     'SELECT * FROM users_auth WHERE email=?'
-  ).get(e);
+  ).get(
+    String(email || '')
+      .trim()
+      .toLowerCase()
+  );
 
   if(
     !a ||
     !bcrypt.compareSync(
-      String(password||''),
+      String(password || ''),
       a.pass_hash
     )
   ){
+
     return res.status(401).json({
       error:'Email yoki parol noto‘g‘ri.'
     });
+
   }
 
-  req.session.userId=a.id;
+  req.session.userId = a.id;
 
   res.json({
     state:publicState(
@@ -482,350 +732,487 @@ app.post('/api/login',(req,res)=>{
       a.id
     )
   });
+
 });
 
 
 app.post('/api/logout',(req,res)=>{
-  req.session.destroy(()=>{
-    res.json({ok:true});
-  });
+
+  req.session.destroy(
+    () => res.json({
+      ok:true
+    })
+  );
+
 });
+
+
 app.post('/api/redeem-code',auth,(req,res)=>{
-  const code=String(req.body?.code||'')
-    .trim()
-    .toUpperCase();
+
+  const code = String(
+    req.body?.code || ''
+  )
+  .trim()
+  .toUpperCase();
 
   if(!code){
+
     return res.status(400).json({
       error:'Kodni kiriting.'
     });
+
   }
 
-  const tx=sql.transaction(()=>{
-    const s=getState();
-    const u=userById(s,req.session.userId);
+  const tx = sql.transaction(()=>{
+
+    const s = getState();
+
+    const u = userById(
+      s,
+      req.session.userId
+    );
 
     if(!u){
-      return {err:'Mijoz topilmadi.'};
+
+      return {
+        err:'Mijoz topilmadi.'
+      };
+
     }
 
-    const c=s.codes.find(
-      x=>x.code===code
+    const c = s.codes.find(
+      x => x.code === code
     );
 
     if(
       !c ||
-      Number(c.uses||0)>=Number(c.max||0)
+      Number(c.uses || 0) >=
+      Number(c.max || 0)
     ){
+
       return {
         err:'Kod noto‘g‘ri yoki foydalanish limiti tugagan.'
       };
+
     }
 
     if(
       sql.prepare(
         'SELECT 1 FROM code_redemptions WHERE user_id=? AND code=?'
-      ).get(u.id,code)
+      ).get(
+        u.id,
+        code
+      )
     ){
+
       return {
         err:'Bu promokodni siz allaqachon ishlatgansiz.'
       };
+
     }
 
-    c.uses=Number(c.uses||0)+1;
+    c.uses =
+      Number(c.uses || 0) + 1;
 
-    u.balance=
-      Number(u.balance||0)+
-      Number(c.amount||0);
+    u.balance =
+      Number(u.balance || 0) +
+      Number(c.amount || 0);
 
-    u.usedCodes=
+    u.usedCodes =
       Array.isArray(u.usedCodes)
         ? u.usedCodes
         : [];
 
-    if(!u.usedCodes.includes(code)){
+    if(
+      !u.usedCodes.includes(code)
+    ){
+
       u.usedCodes.push(code);
+
     }
 
     sql.prepare(
       'INSERT INTO code_redemptions(user_id,code) VALUES(?,?)'
-    ).run(u.id,code);
+    ).run(
+      u.id,
+      code
+    );
 
     setState(s);
 
     return {
       ok:true,
-      state:publicState(s,u.id),
-      amount:Number(c.amount||0)
+      state:publicState(
+        s,
+        u.id
+      ),
+      amount:Number(
+        c.amount || 0
+      )
     };
+
   })();
 
   if(tx.err){
+
     return res.status(400).json({
       error:tx.err
     });
+
   }
 
   res.json(tx);
+
 });
-
-
 app.post('/api/redeem-case-promo',auth,(req,res)=>{
-  const code=String(req.body?.code||'')
-    .trim()
-    .toUpperCase();
 
-  const caseId=String(
-    req.body?.caseId||''
+  const code = String(
+    req.body?.code || ''
+  )
+  .trim()
+  .toUpperCase();
+
+  const caseId = String(
+    req.body?.caseId || ''
   );
 
-  const tx=sql.transaction(()=>{
-    const s=getState();
+  const tx = sql.transaction(()=>{
 
-    const u=userById(
+    const s = getState();
+
+    const u = userById(
       s,
       req.session.userId
     );
 
-    const p=s.promoCodes.find(
-      x=>
-        x.code===code &&
-        String(x.caseId)===caseId
+    const p = s.promoCodes.find(
+      x =>
+        x.code === code &&
+        String(x.caseId) === caseId
     );
 
     if(
       !u ||
       !p ||
-      Number(p.uses||0)>=Number(p.max||0)
+      Number(p.uses || 0) >=
+      Number(p.max || 0)
     ){
+
       return {
         err:'Kod noto‘g‘ri, boshqa keyga tegishli yoki limiti tugagan.'
       };
+
     }
 
     if(
       sql.prepare(
         'SELECT 1 FROM promo_redemptions WHERE user_id=? AND code=?'
-      ).get(u.id,code)
+      ).get(
+        u.id,
+        code
+      )
     ){
+
       return {
         err:'Bu promokodni siz allaqachon ishlatgansiz.'
       };
+
     }
 
-    p.uses=Number(p.uses||0)+1;
+    p.uses =
+      Number(p.uses || 0) + 1;
 
-    u.usedPromoCodes=
+    u.usedPromoCodes =
       Array.isArray(u.usedPromoCodes)
         ? u.usedPromoCodes
         : [];
 
     u.usedPromoCodes.push(code);
 
-    u.caseDiscounts=
-      u.caseDiscounts||{};
+    u.caseDiscounts =
+      u.caseDiscounts || {};
 
-    u.caseDiscounts[caseId]=Math.max(
-      Number(u.caseDiscounts[caseId]||0),
-      Math.min(
-        100,
-        Number(p.discount)||0
-      )
-    );
+    u.caseDiscounts[caseId] =
+      Math.max(
+        Number(
+          u.caseDiscounts[caseId] || 0
+        ),
+        Math.min(
+          100,
+          Number(p.discount) || 0
+        )
+      );
 
     sql.prepare(
       'INSERT INTO promo_redemptions(user_id,code) VALUES(?,?)'
-    ).run(u.id,code);
+    ).run(
+      u.id,
+      code
+    );
 
     setState(s);
 
     return {
       ok:true,
-      state:publicState(s,u.id),
-      discount:Number(p.discount||0)
+      state:publicState(
+        s,
+        u.id
+      ),
+      discount:Number(
+        p.discount || 0
+      )
     };
+
   })();
 
   if(tx.err){
+
     return res.status(400).json({
       error:tx.err
     });
+
   }
 
   res.json(tx);
+
 });
 
 
-app.post('/api/admin/balance',auth,admin,(req,res)=>{
-  const id=String(
-    req.body?.id||''
-  );
+app.post(
+  '/api/admin/balance',
+  auth,
+  admin,
+  (req,res)=>{
 
-  const amount=Number(
-    req.body?.amount||0
-  );
+    const id = String(
+      req.body?.id || ''
+    );
 
-  if(
-    !id ||
-    !Number.isFinite(amount) ||
-    amount===0
-  ){
-    return res.status(400).json({
-      error:'Miqdor noto‘g‘ri.'
-    });
-  }
-
-  const s=getState();
-
-  const u=userById(s,id);
-
-  if(!u || u.admin){
-    return res.status(404).json({
-      error:'Mijoz topilmadi.'
-    });
-  }
-
-  const next=
-    Number(u.balance||0)+amount;
-
-  if(next<0){
-    return res.status(400).json({
-      error:'Balans 0 dan past bo‘lishi mumkin emas.'
-    });
-  }
-
-  u.balance=+next.toFixed(2);
-
-  setState(s);
-
-  res.json({
-    state:publicState(
-      s,
-      req.session.userId
-    )
-  });
-});
-
-
-app.post('/api/sync',auth,(req,res)=>{
-  const incoming=req.body;
-
-  if(
-    !incoming ||
-    typeof incoming!=='object'
-  ){
-    return res.status(400).json({
-      error:'Noto‘g‘ri ma’lumot.'
-    });
-  }
-
-  const s=getState();
-
-  const me=userById(
-    s,
-    req.session.userId
-  );
-
-  const isAdmin=!!me?.admin;
-
-  if(!me){
-    return res.status(401).json({
-      error:'Kirish talab qilinadi.'
-    });
-  }
-
-  if(isAdmin){
-    if(Array.isArray(incoming.cases)){
-      s.cases=incoming.cases;
-    }
-
-    if(Array.isArray(incoming.codes)){
-      s.codes=incoming.codes;
-    }
-
-    if(Array.isArray(incoming.promoCodes)){
-      s.promoCodes=incoming.promoCodes;
-    }
+    const amount = Number(
+      req.body?.amount || 0
+    );
 
     if(
-      incoming.stats &&
-      typeof incoming.stats==='object'
+      !id ||
+      !Number.isFinite(amount) ||
+      amount === 0
     ){
-      s.stats=incoming.stats;
+
+      return res.status(400).json({
+        error:'Miqdor noto‘g‘ri.'
+      });
+
     }
-  }
 
-  if(Array.isArray(incoming.users)){
-    for(const inc of incoming.users){
+    const s = getState();
 
-      if(
-        String(inc.id)!==
-        String(req.session.userId) &&
-        !isAdmin
-      ){
-        continue;
-      }
-
-      const u=userById(
-        s,
-        inc.id
-      );
-
-      if(!u) continue;
-
-      const allowed={
-        ...inc
-      };
-
-      delete allowed.pass;
-      delete allowed.admin;
-
-      if(isAdmin && u.admin){
-        allowed.admin=true;
-      }
-
-      Object.assign(
-        u,
-        allowed
-      );
-    }
-  }
-
-  setState(s);
-
-  res.json({
-    ok:true,
-    state:publicState(
+    const u = userById(
       s,
-      req.session.userId
-    )
-  });
-});
+      id
+    );
 
+    if(
+      !u ||
+      u.admin
+    ){
 
-app.use(
-  express.static(
-    path.join(__dirname,'public')
-  )
+      return res.status(404).json({
+        error:'Mijoz topilmadi.'
+      });
+
+    }
+
+    const next =
+      Number(u.balance || 0) +
+      amount;
+
+    if(next < 0){
+
+      return res.status(400).json({
+        error:'Balans 0 dan past bo‘lishi mumkin emas.'
+      });
+
+    }
+
+    u.balance =
+      +next.toFixed(2);
+
+    setState(s);
+
+    res.json({
+      state:publicState(
+        s,
+        req.session.userId
+      )
+    });
+
+  }
 );
 
 
-app.use((req,res)=>{
-  res.sendFile(
-    path.join(
-      __dirname,
-      'public',
-      'index.html'
-    )
-  );
-});
+app.post(
+  '/api/sync',
+  auth,
+  (req,res)=>{
 
+    const incoming = req.body;
+
+    if(
+      !incoming ||
+      typeof incoming !== 'object'
+    ){
+
+      return res.status(400).json({
+        error:'Noto‘g‘ri ma’lumot.'
+      });
+
+    }
+
+    const s = getState();
+
+    const me = userById(
+      s,
+      req.session.userId
+    );
+
+    const isAdmin =
+      !!me?.admin;
+
+    if(!me){
+
+      return res.status(401).json({
+        error:'Kirish talab qilinadi.'
+      });
+
+    }
+
+    // Faqat admin:
+    // keys, promokodlar va statistikani o‘zgartira oladi.
+    if(isAdmin){
+
+      if(
+        Array.isArray(
+          incoming.cases
+        )
+      ){
+
+        s.cases =
+          incoming.cases;
+
+      }
+
+      if(
+        Array.isArray(
+          incoming.codes
+        )
+      ){
+
+        s.codes =
+          incoming.codes;
+
+      }
+
+      if(
+        Array.isArray(
+          incoming.promoCodes
+        )
+      ){
+
+        s.promoCodes =
+          incoming.promoCodes;
+
+      }
+
+      if(
+        incoming.stats &&
+        typeof incoming.stats === 'object'
+      ){
+
+        s.stats =
+          incoming.stats;
+
+      }
+
+    }
+
+    // Oddiy mijoz faqat o‘z profilini yangilay oladi.
+    if(
+      Array.isArray(
+        incoming.users
+      )
+    ){
+
+      for(
+        const inc of incoming.users
+      ){
+
+        if(
+          String(inc.id) !==
+          String(req.session.userId) &&
+          !isAdmin
+        ){
+
+          continue;
+
+        }
+
+        const u = userById(
+          s,
+          inc.id
+        );
+
+        if(!u) continue;
+
+        const allowed = {
+          ...inc
+        };
+
+        delete allowed.pass;
+        delete allowed.admin;
+
+        // Admin statusini oddiy mijoz
+        // o‘zgartira olmaydi.
+        if(
+          isAdmin &&
+          u.admin
+        ){
+
+          allowed.admin = true;
+
+        }
+
+        Object.assign(
+          u,
+          allowed
+        );
+
+      }
+
+    }
+
+    setState(s);
+
+    res.json({
+      ok:true,
+      state:publicState(
+        s,
+        req.session.userId
+      )
+    });
+
+  }
+);
+app.use(express.static(path.join(__dirname,'public')));
+
+app.use((req,res)=>
+  res.sendFile(
+    path.join(__dirname,'public','index.html')
+  )
+);
 
 app.listen(
   PORT,
-  ()=>{
-    console.log(
-      `GOLDUP server: http://localhost:${PORT}`
-    );
-  }
+  ()=>console.log(
+    `GOLDUP server: http://localhost:${PORT}`
+  )
 );
